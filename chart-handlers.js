@@ -1,217 +1,198 @@
+// Health Risk Factors Dashboard
+// Data source: tries the PHP + MySQL API first (api.php).
+// If that is not available (for example on static hosting), it falls back
+// to reading the CSV file directly in the browser with PapaParse.
+
 document.addEventListener('DOMContentLoaded', function () {
     let riskFactors = [];
-    let lineChart, barChart, map, geoJsonLayer;
+    let lineChart, barChart, map, geoJsonLayer, countryGeoJSON;
 
-    // Function to process the data and extract unique years, countries, and risk factors
+    // Columns that are not risk factors
+    const NON_FACTOR_KEYS = ['id', 'entity', 'year'];
+
+    // GeoJSON country names that are spelled differently in the dataset
+    const GEO_NAME_TO_DATA_NAME = {
+        'United States of America': 'United States',
+        'United Republic of Tanzania': 'Tanzania',
+        'Democratic Republic of the Congo': 'Democratic Republic of Congo',
+        'Republic of the Congo': 'Congo',
+        'Czech Republic': 'Czechia',
+        'Republic of Serbia': 'Serbia',
+        'The Bahamas': 'Bahamas',
+        'Ivory Coast': "Cote d'Ivoire",
+        'Guinea Bissau': 'Guinea-Bissau',
+        'East Timor': 'Timor',
+        'Swaziland': 'Eswatini',
+        'Macedonia': 'North Macedonia',
+        'West Bank': 'Palestine'
+    };
+
+    function dataNameFor(geoName) {
+        return GEO_NAME_TO_DATA_NAME[geoName] || geoName;
+    }
+
+    // Turn a CSV header like "High body-mass index" into "high_body_mass_index",
+    // so CSV rows have the same keys as rows from the database.
+    function toColumnName(header) {
+        return header.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+    }
+
+    function prettyLabel(key) {
+        const text = key.replace(/_/g, ' ');
+        return text.charAt(0).toUpperCase() + text.slice(1);
+    }
+
+    // Load rows from the PHP API. Rejects if the API is missing or returns non-JSON.
+    function loadFromApi() {
+        return fetch('api.php')
+            .then(response => {
+                if (!response.ok) throw new Error('API returned ' + response.status);
+                return response.json();
+            })
+            .then(rows => {
+                if (!Array.isArray(rows) || rows.length === 0) throw new Error('API returned no rows');
+                return rows;
+            });
+    }
+
+    // Load rows straight from the CSV file.
+    function loadFromCsv() {
+        return new Promise((resolve, reject) => {
+            Papa.parse('number-of-deaths-by-risk-factor.csv', {
+                download: true,
+                header: true,
+                skipEmptyLines: true,
+                transformHeader: toColumnName,
+                complete: results => resolve(results.data),
+                error: reject
+            });
+        });
+    }
+
+    function loadData() {
+        return loadFromApi().catch(error => {
+            console.info('API not available, reading the CSV instead:', error.message);
+            return loadFromCsv();
+        });
+    }
+
+    function loadGeoJson() {
+        return fetch('countries.geo.json').then(response => response.json());
+    }
+
     function processData(data) {
-        // Extract unique years from the data
-        const years = [...new Set(data.map(item => item.Year))];
-        // Extract unique countries from the data
-        const countries = [...new Set(data.map(item => item.Entity))];
-        // Extract risk factors from the data (assume they start from the 3rd column)
-        riskFactors = Object.keys(data[0]).slice(2);
-
+        const years = [...new Set(data.map(item => String(item.year)))].sort();
+        const countries = [...new Set(data.map(item => item.entity))].sort();
+        riskFactors = Object.keys(data[0]).filter(key => !NON_FACTOR_KEYS.includes(key));
         return { years, countries, data };
     }
 
-    // Function to update charts with selected year and country data
-    function updateCharts(data, selectedYear, selectedCountry) {
-        // Filter data for the selected year and country
-        const filteredData = data.filter(item => item.Year == selectedYear && item.Entity == selectedCountry);
-
-        // Prepare data for charts
-        const labels = riskFactors;
-        const datasets = [{
-            label: selectedCountry,
-            data: riskFactors.map(factor => parseFloat(filteredData[0][factor])),
-            borderColor: '#ffe1ff',
-            backgroundColor: '#ffe1ff', // Solid color for bar chart
-            fill: false
-        }];
-
-        // Update Line Chart
-        if (lineChart) {
-            lineChart.data.labels = labels;
-            lineChart.data.datasets = datasets;
-            lineChart.update();
-        }
-
-        // Update Bar Chart
-        if (barChart) {
-            barChart.data.labels = labels;
-            barChart.data.datasets = datasets;
-            barChart.update();
-        }
+    function fillSelect(select, values, labelFn) {
+        values.forEach(value => {
+            const option = document.createElement('option');
+            option.value = value;
+            option.text = labelFn ? labelFn(value) : value;
+            select.appendChild(option);
+        });
     }
 
-    // Function to update map with selected year and risk factor data
+    function makeChart(context, type) {
+        return new Chart(context, {
+            type: type,
+            data: { labels: [], datasets: [] },
+            options: {
+                scales: {
+                    x: { ticks: { color: '#e0e0e0' }, grid: { color: '#444' } },
+                    y: { ticks: { color: '#e0e0e0' }, grid: { color: '#444' } }
+                },
+                plugins: { legend: { labels: { color: '#e0e0e0' } } }
+            }
+        });
+    }
+
+    function updateCharts(data, selectedYear, selectedCountry) {
+        const row = data.find(item => String(item.year) === String(selectedYear) && item.entity === selectedCountry);
+        if (!row) {
+            console.error('No data for', selectedCountry, selectedYear);
+            return;
+        }
+        const datasets = [{
+            label: selectedCountry + ' (' + selectedYear + ')',
+            data: riskFactors.map(factor => parseFloat(row[factor])),
+            borderColor: '#ffe1ff',
+            backgroundColor: '#ffe1ff',
+            fill: false
+        }];
+        const labels = riskFactors.map(prettyLabel);
+
+        [lineChart, barChart].forEach(chart => {
+            chart.data.labels = labels;
+            chart.data.datasets = datasets;
+            chart.update();
+        });
+    }
+
     function updateMap(data, selectedYear, selectedRiskFactor) {
-        // Filter data for the selected year
-        const filteredData = data.filter(item => item.Year == selectedYear);
-        const maxDeaths = Math.max(...filteredData.map(item => parseFloat(item[selectedRiskFactor])));
-        // Create a color scale based on the number of deaths
+        const rowsForYear = data.filter(item => String(item.year) === String(selectedYear));
+        const byCountry = new Map(rowsForYear.map(item => [item.entity, parseFloat(item[selectedRiskFactor])]));
+        const maxDeaths = Math.max(...byCountry.values());
         const colorScale = chroma.scale(['pink', 'magenta', 'red']).domain([0, maxDeaths]);
 
-        // Remove previous GeoJSON layer if it exists
-        if (geoJsonLayer) {
-            map.removeLayer(geoJsonLayer);
-        }
+        if (geoJsonLayer) map.removeLayer(geoJsonLayer);
 
-        // Add new GeoJSON layer with updated data and styles
         geoJsonLayer = L.geoJSON(countryGeoJSON, {
-            style: function (feature) {
-                const countryData = filteredData.find(item => item.Entity === feature.properties.name);
-                const deaths = countryData ? parseFloat(countryData[selectedRiskFactor]) : 0;
+            style: feature => {
+                const deaths = byCountry.get(dataNameFor(feature.properties.name));
                 return {
-                    fillColor: colorScale(deaths).hex(),
+                    fillColor: deaths === undefined ? '#555' : colorScale(deaths).hex(),
                     fillOpacity: 0.7,
                     color: '#000',
                     weight: 1
                 };
             },
-            onEachFeature: function (feature, layer) {
-                const countryData = filteredData.find(item => item.Entity === feature.properties.name);
-                const deaths = countryData ? parseFloat(countryData[selectedRiskFactor]) : 0;
-                layer.bindTooltip(`<strong>${feature.properties.name}</strong><br>${deaths} deaths`);
+            onEachFeature: (feature, layer) => {
+                const deaths = byCountry.get(dataNameFor(feature.properties.name));
+                const text = deaths === undefined ? 'No data' : Math.round(deaths).toLocaleString() + ' deaths';
+                layer.bindTooltip('<strong>' + feature.properties.name + '</strong><br>' + text);
             }
         }).addTo(map);
     }
 
-    // Helper function to generate a random color
-    function getRandomColor() {
-        const letters = '0123456789ABCDEF';
-        let color = '#';
-        for (let i = 0; i < 6; i++) {
-            color += letters[Math.floor(Math.random() * 16)];
-        }
-        return color;
-    }
-
-    // Fetch country GeoJSON data for the map
-    let countryGeoJSON;
-    fetch('countries.geo.json')
-        .then(response => response.json())
-        .then(geojson => {
+    // Wait for both the map shapes and the data before drawing anything.
+    Promise.all([loadGeoJson(), loadData()])
+        .then(([geojson, rawData]) => {
             countryGeoJSON = geojson;
-
-            // Initialize Leaflet map
             map = L.map('mapContainer').setView([20, 0], 2);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
                 attribution: '&copy; OpenStreetMap contributors'
             }).addTo(map);
-        })
-        .catch(error => console.error('Error fetching GeoJSON:', error));
 
-    // Fetch CSV data and initialize charts
-    fetch('http://localhost:8000/number-of-deaths-by-risk-factor.csv')
-        .then(response => response.text())
-        .then(csvText => {
-            const csvData = Papa.parse(csvText, { header: true }).data;
-            console.log('CSV Data:', csvData); // Debugging log
-            const { years, countries, data } = processData(csvData);
+            const { years, countries, data } = processData(rawData);
 
-            // Populate year select dropdown
             const yearSelect = document.getElementById('yearSelect');
-            years.forEach(year => {
-                const option = document.createElement('option');
-                option.value = year;
-                option.text = year;
-                yearSelect.appendChild(option);
-            });
-
-            // Populate country select dropdown
             const countrySelect = document.getElementById('countrySelect');
-            countries.forEach(country => {
-                const option = document.createElement('option');
-                option.value = country;
-                option.text = country;
-                countrySelect.appendChild(option);
-            });
-
-            // Populate risk factor select dropdown
             const riskFactorSelect = document.getElementById('riskFactorSelect');
-            riskFactors.forEach(riskFactor => {
-                const option = document.createElement('option');
-                option.value = riskFactor;
-                option.text = riskFactor;
-                riskFactorSelect.appendChild(option);
-            });
 
-            // Initialize charts
-            const lineCtx = document.getElementById('lineChart').getContext('2d');
-            const barCtx = document.getElementById('barChart').getContext('2d');
+            fillSelect(yearSelect, years);
+            fillSelect(countrySelect, countries);
+            fillSelect(riskFactorSelect, riskFactors, prettyLabel);
 
-            // Create Line Chart
-            lineChart = new Chart(lineCtx, {
-                type: 'line',
-                data: { labels: [], datasets: [] },
-                options: {
-                    scales: {
-                        x: {
-                            ticks: { color: '#e0e0e0' },
-                            grid: { color: '#444' }
-                        },
-                        y: {
-                            ticks: { color: '#e0e0e0' },
-                            grid: { color: '#444' }
-                        }
-                    },
-                    plugins: {
-                        legend: { labels: { color: '#e0e0e0' } }
-                    }
-                }
-            });
+            lineChart = makeChart(document.getElementById('lineChart').getContext('2d'), 'line');
+            barChart = makeChart(document.getElementById('barChart').getContext('2d'), 'bar');
 
-            // Create Bar Chart
-            barChart = new Chart(barCtx, {
-                type: 'bar',
-                data: { labels: [], datasets: [] },
-                options: {
-                    scales: {
-                        x: {
-                            ticks: { color: '#e0e0e0' },
-                            grid: { color: '#444' }
-                        },
-                        y: {
-                            ticks: { color: '#e0e0e0' },
-                            grid: { color: '#444' }
-                        }
-                    },
-                    plugins: {
-                        legend: { labels: { color: '#e0e0e0' } }
-                    }
-                }
-            });
+            updateCharts(data, yearSelect.value, countrySelect.value);
+            updateMap(data, yearSelect.value, riskFactorSelect.value);
 
-            // Initial update of charts and map with default selections
-            const initialYear = years[0];
-            const initialCountry = countries[0];
-            const initialRiskFactor = riskFactors[0];
-
-            updateCharts(data, initialYear, initialCountry);
-            updateMap(data, initialYear, initialRiskFactor);
-
-            // Event listener to update charts on year selection change
             yearSelect.addEventListener('change', () => {
-                const selectedYear = yearSelect.value;
-                const selectedCountry = countrySelect.value;
-                updateCharts(data, selectedYear, selectedCountry);
-                updateMap(data, selectedYear, riskFactorSelect.value);
+                updateCharts(data, yearSelect.value, countrySelect.value);
+                updateMap(data, yearSelect.value, riskFactorSelect.value);
             });
-
-            // Event listener to update charts on country selection change
             countrySelect.addEventListener('change', () => {
-                const selectedYear = yearSelect.value;
-                const selectedCountry = countrySelect.value;
-                updateCharts(data, selectedYear, selectedCountry);
+                updateCharts(data, yearSelect.value, countrySelect.value);
             });
-
-            // Event listener to update map on risk factor selection change
             riskFactorSelect.addEventListener('change', () => {
-                const selectedYear = yearSelect.value;
-                const selectedRiskFactor = riskFactorSelect.value;
-                updateMap(data, selectedYear, selectedRiskFactor);
+                updateMap(data, yearSelect.value, riskFactorSelect.value);
             });
         })
-        .catch(error => console.error('Error fetching or parsing CSV:', error));
+        .catch(error => console.error('Could not load the dashboard data:', error));
 });
